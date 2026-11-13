@@ -555,7 +555,7 @@ def extract_from_image(image, path):
 
 
 def apply_cloud_patch(new_upstream, current_patched):
-    """把排队补丁（3 处）重打到新版上游 cloud.py 上；锚点对不上就抛错（安全中止）。
+    """把补丁（排队 3 处 + 剩余时长检测 1 处）重打到新版上游 cloud.py 上；锚点对不上就抛错（安全中止）。
 
     上游若已内置同款兜底，直接返回上游原文。
     """
@@ -602,6 +602,51 @@ def apply_cloud_patch(new_upstream, current_patched):
     out = out[:q_start] + block + out[q_end:]
     if out.count('includes("加载中")') != 1:
         raise RuntimeError("补丁校验失败：加载中判断出现次数异常")
+    # 锚点 4：剩余时长检测。2026-11-13 实测：钱包检测循环在付费项先渲染出 0 的
+    # 瞬间就 break，免费项还没读到就判了总数 0（账号实际有 600 分钟免费时长）。
+    anchor4_old = (
+        "            # 检测剩余时长，为 0 则直接终止（等待钱包区域渲染，最多 5 秒）\n"
+        '            self.log_info("正在检测云游戏剩余时长...")\n'
+        "            paid, free = None, None\n"
+        "            for _ in range(5):\n"
+        "                paid, free = self._get_remaining_playtime()\n"
+        "                if paid is not None or free is not None:\n"
+        "                    break\n"
+        "                time.sleep(1)\n"
+        "\n"
+        "            remaining = (paid or 0) + (free or 0)\n"
+        "            self._paid_time = paid or 0\n"
+    )
+    if out.count(anchor4_old) != 1:
+        raise RuntimeError("补丁锚点 4（剩余时长检测）对不上新版")
+    anchor4_new = (
+        "            # 检测剩余时长，为 0 则直接终止（等待钱包区域渲染，最多 10 秒；付费/免费两项都读到才算数，避免先渲染出的 0 导致误判）\n"
+        '            self.log_info("正在检测云游戏剩余时长...")\n'
+        "            paid, free = None, None\n"
+        "            for _ in range(10):\n"
+        "                paid, free = self._get_remaining_playtime()\n"
+        "                if paid is not None and free is not None:\n"
+        "                    break\n"
+        "                time.sleep(1)\n"
+        "\n"
+        "            # 合计为 0 时二次确认：钱包数字异步刷新，单次读到 0 可能是占位值\n"
+        "            if (paid or 0) + (free or 0) == 0 and not (paid is None and free is None):\n"
+        "                time.sleep(3)\n"
+        "                paid2, free2 = self._get_remaining_playtime()\n"
+        "                if paid2 is not None or free2 is not None:\n"
+        "                    paid, free = paid2, free2\n"
+        "\n"
+        "            # 只读到其中一项且合计为 0：无法确认真的为 0，视为无法识别，走继续尝试进入游戏的分支\n"
+        "            if (paid is None) != (free is None) and (paid or 0) + (free or 0) == 0:\n"
+        "                paid, free = None, None\n"
+        "\n"
+        "            remaining = (paid or 0) + (free or 0)\n"
+        "            self._paid_time = paid or 0\n"
+        '            self.log_info(f"剩余时长检测结果：付费={paid}, 免费={free}")\n'
+    )
+    out = out.replace(anchor4_old, anchor4_new, 1)
+    if out.count("剩余时长检测结果") != 1:
+        raise RuntimeError("补丁校验失败：剩余时长检测补丁出现次数异常")
     return out, "repatched"
 
 
@@ -664,7 +709,7 @@ def run_update():
             st.update(phase="done", message="已是最新版本，无需更新", finished_at=int(time.time()))
             save_update(st)
             return
-        st.update(phase="patching", message="正在给新版重打排队补丁…")
+        st.update(phase="patching", message="正在给新版重打补丁（排队+剩余时长）…")
         save_update(st)
         new_up = extract_from_image(new_id, "/m7a/module/game/cloud.py").decode("utf-8")
         panel_patch = os.path.join(M7A_DIR, "patches", "cloud.py")
