@@ -1,0 +1,14 @@
+services:
+  m7a-panel:
+    container_name: m7a-panel
+    build: .
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/march7thassistant:/m7a
+      - ./data:/data
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    mem_limit: 128m
